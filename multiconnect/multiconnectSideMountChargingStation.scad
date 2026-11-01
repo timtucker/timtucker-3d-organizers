@@ -27,7 +27,7 @@ Licensed Creative Commons 4.0 Non-Commercial Sharable with Attribution (CC BY-NC
 
 */
 include <BOSL2/std.scad>
-include <hexGrid.scad>
+include <../hexGrid.scad>
 
 /* [Holder Parameters] */
 item_rows = 3; // Number of stacked rows (Y-axis grid height)
