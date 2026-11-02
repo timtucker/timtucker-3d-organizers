@@ -2,7 +2,7 @@
 Small cabinet organizer designed to have a keep-away area for openGrid mounted items on the back of the door
 */
 include <BOSL2/std.scad>
-include <./reinforced_screw_hole.scad>
+include <./lib/reinforced_screw_hole.scad>
 
 // Fast preview ($fn = 16) / smooth render ($fn = 128)
 $fn = $preview ? 16 : 128;

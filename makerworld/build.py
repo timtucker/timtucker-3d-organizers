@@ -96,7 +96,7 @@ def get_default_paths():
 def discover_scad_files(src_dir, exclude_dirs=None):
     """Find all .scad files in src_dir, excluding specified directories and hidden folders."""
     if exclude_dirs is None:
-        exclude_dirs = {"makerworld", ".git", "dist", ".vscode", ".idea", "__pycache__"}
+        exclude_dirs = {"makerworld", ".git", "dist", ".vscode", ".idea", "__pycache__", "lib"}
     else:
         exclude_dirs = {d.lower() for d in exclude_dirs}
 

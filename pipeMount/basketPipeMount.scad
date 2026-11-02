@@ -31,7 +31,7 @@ include <BOSL2/std.scad>
 include <BOSL2/threading.scad>
 
 // Include external optimized hex grid pattern generator
-use <hexGrid.scad>
+include <../lib/hexGrid.scad>
 
 /* [Part Selection / Display] */
 // Select render view
