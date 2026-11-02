@@ -1,7 +1,4 @@
-/*Created by Tim Tucker
-
-- Modified for Multiconnect Hex Openings & Front-Inserting Markers
-
+/*Created by Tim Tucker - Modified for Multiconnect Hex Openings & Front-Inserting Markers
 Credits: Credit to @David D on Printables and Jonathan at Keep Making for Multiconnect and Multiboard, respectively 
 @Dontic on GitHub for Multiconnect v2 code 
 Andy Levesque (original scripts for rounded item holder from https://github.com/AndyLevesque/QuackWorks) 
@@ -14,8 +11,8 @@ Change Log:
 - 2026-10-31 - Corrected edge treatment: chamfers assigned strictly to the bottom face, fillets to front and side faces
 - 2026-10-31 - Added threaded bolt cap module using BOSL2 screw_hole with base taper and top ridge
 - 2026-11-01 - Replaced screw-together cap/bolt with unified front-inserting Marker
-- 2026-11-01 - Added double chamfers for face-down printing and a 6-point star press-fit peg with dynamic 10mm max depth
-- 2026-11-01 - Replaced primitive CSG cuts with native BOSL2 cuboids with end chamfers
+- 2026-11-01 - Converted marker peg to tapered cone with start/end slop controls
+- 2026-11-01 - Flattened top cap face profile to ensure exact level surface on top face
 */
 include <BOSL2/std.scad>
 include <BOSL2/screws.scad>
@@ -23,7 +20,7 @@ include <./multiconnectSlots.scad>
 
 /*[Render Selection]*/
 // Select which part to render
-itemToRender = "Marker"; // ["Main Body", "Bolt Cap", "Marker", "All Assembly"]
+itemToRender = "Bolt Cap"; // ["Main Body", "Bolt Cap", "Marker", "All Assembly"]
 
 /*[Bolt Hole Parameters]*/
 // Selectable standard imperial or metric bolt size
@@ -42,12 +39,11 @@ hexDepthOverride = 0; // [0:0.5:20]
 multiconnectRailDepth = 4.25;
 
 /*[Fit Tolerances]*/
-// Clearance slop for unthreaded parts (Higher value = looser fit / wider holes & thinner shaft)
-boltFitSlop = -0.10; // [-5.00:0.05:0.50]
-capThreadSlop = 0.2; // [0.00:0.05:0.50]
+// Clearance slop for unthreaded parts
+boltFitSlop = -0.10; // [-0.30:0.01:0.50]
 
-// Fine-tuning clearance offset for the star peg fins (0.00 - 0.15mm works best for press-fit)
-starPegSlop = 0.10; // [0.00:0.01:0.30]
+// Clearance slop for threaded cap mesh
+capThreadSlop = 0.25; // [0.00:0.01:0.50]
 
 /*[Standard Bolt Cap Parameters]*/
 // Total length of the exposed bolt sticking out to be covered by the cap
@@ -57,7 +53,7 @@ exposedBoltLength = 92; // [10:1:200]
 threadsStart = 70; // [0:1:200]
 
 // Minimum wall thickness surrounding the bolt cavity
-capWallThickness = 2.5; // [1:0.5:10]
+capWallThickness = 2.0; // [1:0.5:10]
 
 // Outer base radius of the standard cap
 capBaseRadius = 9; // [5:0.5:30]
@@ -67,6 +63,9 @@ taperHeight = 12; // [5:1:30]
 
 // Fillet radius for external profile transitions on the top grip ridge
 filletRadius = 0.8; // [0.1:0.1:2.0]
+
+// End lip overhang radius step at top grip ridge
+capEndLipRadius = 1.0; // [0.0:0.2:3.0]
 
 /*[Front-Inserting Marker Parameters]*/
 // Outer radius of the marker cap head collar
@@ -80,6 +79,12 @@ markerChamfer = 1.0; // [0.5:0.5:3.0]
 
 // Target insertion depth into the bolt hole (dynamically limited if hole depth is smaller)
 targetInsertionDepth = 10; // [3:1:20]
+
+// Slop offset at the start of the marker cone peg (near collar base)
+markerStartSlop = -0.10; // [-0.50:0.01:0.30]
+
+// Slop offset at the end of the marker cone peg (at tip)
+markerEndSlop = -0.05; // [-0.50:0.01:0.50]
 
 /*[Guide Parameters]*/
 // How thick the guide itself is
@@ -132,7 +137,9 @@ echo(str("Rendered Hole Diameter: ", boltDiameter, " mm"));
 echo(str("Rendered Hex Flat-to-Flat: ", hexFlatToFlat, " mm"));
 echo(str("Rendered Hex Depth: ", hexDepth, " mm"));
 echo(str("Active Fit Slop: ", boltFitSlop, " mm"));
-echo(str("Active Star Peg Slop: ", starPegSlop, " mm"));
+echo(str("Active Thread Slop: ", capThreadSlop, " mm"));
+echo(str("Marker Start Slop: ", markerStartSlop, " mm"));
+echo(str("Marker End Slop: ", markerEndSlop, " mm"));
 echo("========================================");
 
 totalWidth = slotsWide * distanceBetweenSlots;
@@ -235,13 +242,14 @@ module bolt_openings() {
   }
 }
 
-// Single upright bolt cap module
+// Single upright bolt cap module (Strictly flat top face)
 module single_bolt_cap() {
   capHeight = exposedBoltLength + capWallThickness;
   bodyRadius = (boltDiameter / 2) + capWallThickness;
   topRidgeHeight = 6;
   baseCylinderHeight = 5;
   r_fillet = min(filletRadius, 0.8);
+  lipR = capEndLipRadius;
   
   deltaR = max(0, capBaseRadius - bodyRadius);
   taperEndHeight = baseCylinderHeight + taperHeight;
@@ -269,15 +277,16 @@ module single_bolt_cap() {
 
   topPoints = [
     [bodyRadius, straightBodyHeight],
-    [bodyRadius + 2, straightBodyHeight + 2],
-    [bodyRadius + 2, straightBodyHeight + 4],
-    [bodyRadius, straightBodyHeight + 6],
-    [0, capHeight]
+    [bodyRadius + lipR, straightBodyHeight + lipR],
+    [bodyRadius + lipR, capHeight - r_fillet],
+    [bodyRadius + lipR - r_fillet, capHeight],
+    [0, capHeight]                                     // Locked flat top face ending on Z=capHeight
   ];
 
   rawUpperPoints = concat(sineTaperPoints, topPoints);
 
-  topRadii = [r_fillet, r_fillet, r_fillet, r_fillet, 0];
+  // Apply rounding to grip ridge corners while preserving flat top end
+  topRadii = [r_fillet, r_fillet, r_fillet, 0, 0];
   sineRadii = [for (i = [0 : len(sineTaperPoints)-1]) 0];
   upperRadii = concat(sineRadii, topRadii);
 
@@ -323,7 +332,7 @@ module single_bolt_cap() {
   }
 }
 
-// Unified Front-Inserting Marker Module
+// Unified Front-Inserting Marker Module with Tapered Cone Peg
 module marker_front_insert() {
   h = markerHeadHeight;
   r = markerRadius;
@@ -332,12 +341,16 @@ module marker_front_insert() {
   // Max hole pass-through depth
   passThroughLength = thickness - multiconnectRailDepth - hexDepth;
   
-  // Peg inserts 10mm (or less if total available hole depth is smaller)
+  // Peg inserts target depth (or max available depth)
   pegLength = min(targetInsertionDepth, max(3, passThroughLength));
-  
-  // Span width calibrated for a snug press-fit against the bolt hole ID
-  barSpan = boltDiameter + 0.10 - starPegSlop;
-  barThick = max(1.0, min(1.5, boltDiameter * 0.20));
+
+  // Tapered cone diameters calculated directly from bolt hole diameter & slop offsets
+  startDiameter = max(1.0, boltDiameter - markerStartSlop);
+  endDiameter   = max(0.8, boltDiameter - markerEndSlop);
+
+  // Tip entry chamfer dimensions
+  tipChamferLen = min(1.0, pegLength * 0.25);
+  mainPegLen    = pegLength - tipChamferLen;
 
   // Double chamfer profile for marker head collar (Chamfer on both front & back faces)
   headProfile = [
@@ -355,19 +368,24 @@ module marker_front_insert() {
       polygon(points=headProfile);
     }
 
-    // 2. 3 Intersecting BOSL2 Cuboids at 0°, 60°, and 120° with 2mm Tip Chamfers
+    // 2. Tapered Cone Peg extending back from head (into +Z direction)
     translate([0, 0, h]) {
-      for (a = [0, 60, 120]) {
-        rotate([0, 0, a]) {
-          // BOSL2 cuboid anchored at BOTTOM center (+Z direction)
-          // Top outer edges (+X and -X at Z=pegLength) receive a 2mm chamfer
-          cuboid(
-            [barSpan, barThick, pegLength],
-            anchor = BOTTOM,
-            chamfer = 1.5,
-            edges = [TOP + RIGHT, TOP + LEFT]
-          );
-        }
+      // Main Tapered Shaft
+      cylinder(
+        d1 = startDiameter,
+        d2 = endDiameter,
+        h  = mainPegLen,
+        $fn = circleResolution
+      );
+
+      // 1mm Tip Entry Chamfer for smooth insertion
+      translate([0, 0, mainPegLen]) {
+        cylinder(
+          d1 = endDiameter,
+          d2 = max(0.5, endDiameter - 1.0),
+          h  = tipChamferLen,
+          $fn = circleResolution
+        );
       }
     }
   }
