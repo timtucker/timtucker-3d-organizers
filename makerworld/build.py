@@ -6,9 +6,15 @@ Compiles all OpenSCAD models in the parent directory (excluding makerworld/)
 into standalone single-file scripts under makerworld/dist/, preserving the
 exact directory hierarchy.
 
-Uses OpenSCAD's `-o` export function (--export-format csg) to inline all
+Uses OpenSCAD's `-o` export function to inline all
 includes, modules, and dependencies into self-contained .scad files ready
 for upload to MakerWorld's Parametric Model Maker.
+
+Features:
+- Configurable per-file timeout (default: 60s).
+- In-progress heartbeat updates every 15s for long-running conversions.
+- Auto-detection of OpenSCAD across platforms.
+- Automatic OPENSCADPATH configuration for repository includes and BOSL2.
 """
 
 import argparse
@@ -16,9 +22,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# Thread lock for clean console output during concurrent builds
+print_lock = threading.Lock()
 
 
 def find_openscad(custom_path=None):
@@ -35,20 +46,20 @@ def find_openscad(custom_path=None):
         return env_path
 
     # Check system PATH
-    which_scad = shutil.which("openscad") or shutil.which("openscad.com") or shutil.which("openscad.exe")
+    which_scad = shutil.which("openscad.exe") or shutil.which("openscad.com") or shutil.which("openscad")
     if which_scad:
         return which_scad
 
-    # Windows candidate paths (prefer .com CLI wrappers over .exe for proper stdout/stderr)
+    # Windows candidate paths (prefer openscad.exe for direct process signal handling)
     windows_candidates = [
-        r"C:\Program Files\OpenSCAD (Nightly)\openscad.com",
-        r"C:\Program Files\OpenSCAD\openscad.com",
-        r"C:\Program Files (x86)\OpenSCAD\openscad.com",
         r"C:\Program Files\OpenSCAD (Nightly)\openscad.exe",
         r"C:\Program Files\OpenSCAD\openscad.exe",
         r"C:\Program Files (x86)\OpenSCAD\openscad.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\OpenSCAD\openscad.com"),
+        r"C:\Program Files\OpenSCAD (Nightly)\openscad.com",
+        r"C:\Program Files\OpenSCAD\openscad.com",
+        r"C:\Program Files (x86)\OpenSCAD\openscad.com",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\OpenSCAD\openscad.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\OpenSCAD\openscad.com"),
     ]
     for cand in windows_candidates:
         if Path(cand).is_file():
@@ -96,7 +107,7 @@ def get_default_paths():
 def discover_scad_files(src_dir, exclude_dirs=None):
     """Find all .scad files in src_dir, excluding specified directories and hidden folders."""
     if exclude_dirs is None:
-        exclude_dirs = {"makerworld", ".git", "dist", ".vscode", ".idea", "__pycache__", "lib"}
+        exclude_dirs = {"makerworld", ".git", "dist", ".vscode", ".idea", "__pycache__", "lib", "forks"}
     else:
         exclude_dirs = {d.lower() for d in exclude_dirs}
 
@@ -125,70 +136,140 @@ def discover_scad_files(src_dir, exclude_dirs=None):
     return scad_files
 
 
-def compile_single_file(openscad_exe, src_file, dest_file, env, timeout=300):
+def _run_openscad_process(cmd, env, log_path, t0, timeout, heartbeat_interval, on_heartbeat):
+    """Executes an OpenSCAD command, polling for completion, timeouts, and heartbeat updates."""
+    next_heartbeat = heartbeat_interval
+    timed_out = False
+
+    with open(log_path, "w", encoding="utf-8", errors="replace") as out_f:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=out_f,
+            stderr=subprocess.STDOUT,
+            env=env
+        )
+
+        while True:
+            retcode = proc.poll()
+            if retcode is not None:
+                break
+
+            elapsed = time.time() - t0
+            if elapsed >= timeout:
+                timed_out = True
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+                break
+
+            if elapsed >= next_heartbeat:
+                if on_heartbeat:
+                    on_heartbeat(int(elapsed))
+                while next_heartbeat <= elapsed:
+                    next_heartbeat += heartbeat_interval
+
+            time.sleep(0.5)
+
+    return retcode, timed_out
+
+
+def compile_single_file(openscad_exe, src_file, dest_file, env, timeout=60, heartbeat_interval=15, on_heartbeat=None):
     """
     Invokes OpenSCAD's -o export function to produce a standalone single-file script.
-    Tries direct --export-format csg -o dest.scad first, with a fallback to
-    exporting .csg and copying to destination.
+    Monitors process execution, invoking on_heartbeat every heartbeat_interval seconds
+    if conversion takes longer than heartbeat_interval.
+    Kills the process if timeout is reached.
     """
     dest_file = Path(dest_file)
     dest_file.parent.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
 
-    # Primary method: Direct export using --export-format csg
+    # Primary method: Direct export using --export-format scad -o dest.scad
     cmd = [
         openscad_exe,
-        "--export-format", "csg",
+        # "--export-format", "scad",
         "-o", str(dest_file),
         str(src_file)
     ]
 
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as tmp_log:
+        log_path = Path(tmp_log.name)
+
     try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            timeout=timeout
+        retcode, timed_out = _run_openscad_process(
+            cmd, env, log_path, t0, timeout, heartbeat_interval, on_heartbeat
         )
         elapsed = time.time() - t0
 
-        if proc.returncode == 0 and dest_file.is_file() and dest_file.stat().st_size > 0:
-            return True, dest_file.stat().st_size, elapsed, proc.stdout + proc.stderr
+        err_msg = ""
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8", errors="replace") as log_r:
+                err_msg = log_r.read()
 
-        # Fallback method: Export to a temporary .csg and rename/copy to .scad
-        temp_csg = dest_file.with_suffix(".temp.csg")
-        cmd_fallback = [
-            openscad_exe,
-            "-o", str(temp_csg),
-            str(src_file)
-        ]
+        if timed_out:
+            if dest_file.exists():
+                try:
+                    dest_file.unlink()
+                except OSError:
+                    pass
+            return False, 0, elapsed, f"Conversion timed out after {timeout}s", True
 
-        proc_fallback = subprocess.run(
-            cmd_fallback,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            timeout=timeout
-        )
-        elapsed = time.time() - t0
+        if retcode == 0 and dest_file.is_file() and dest_file.stat().st_size > 0:
+            return True, dest_file.stat().st_size, elapsed, err_msg, False
 
-        if proc_fallback.returncode == 0 and temp_csg.is_file():
-            shutil.move(str(temp_csg), str(dest_file))
-            return True, dest_file.stat().st_size, elapsed, proc_fallback.stdout + proc_fallback.stderr
-        else:
-            if temp_csg.is_file():
-                temp_csg.unlink()
-            err_msg = (proc.stderr or proc.stdout or proc_fallback.stderr or proc_fallback.stdout).strip()
-            return False, 0, elapsed, err_msg
+        # Fallback method: If primary failed and there is remaining time, export to temp .scad
+        remaining = timeout - elapsed
+        if remaining > 5:
+            temp_scad = dest_file.with_suffix(".temp.scad")
+            cmd_fallback = [
+                openscad_exe,
+                "-o", str(temp_scad),
+                str(src_file)
+            ]
 
-    except subprocess.TimeoutExpired:
-        return False, 0, timeout, f"Build timed out after {timeout} seconds"
+            retcode_fb, timed_out_fb = _run_openscad_process(
+                cmd_fallback, env, log_path, t0, timeout, heartbeat_interval, on_heartbeat
+            )
+            elapsed = time.time() - t0
+
+            if log_path.exists():
+                with open(log_path, "r", encoding="utf-8", errors="replace") as log_r:
+                    err_msg = log_r.read()
+
+            if timed_out_fb:
+                if temp_scad.exists():
+                    try:
+                        temp_scad.unlink()
+                    except OSError:
+                        pass
+                return False, 0, elapsed, f"Conversion timed out after {timeout}s", True
+
+            if retcode_fb == 0 and temp_scad.is_file() and temp_scad.stat().st_size > 0:
+                shutil.move(str(temp_scad), str(dest_file))
+                return True, dest_file.stat().st_size, elapsed, err_msg, False
+            else:
+                if temp_scad.exists():
+                    try:
+                        temp_scad.unlink()
+                    except OSError:
+                        pass
+                return False, 0, elapsed, err_msg.strip() or f"Process exited with code {retcode_fb}", False
+
+        return False, 0, elapsed, err_msg.strip() or f"Process exited with code {retcode}", False
+
     except Exception as e:
-        return False, 0, time.time() - t0, str(e)
+        elapsed = time.time() - t0
+        return False, 0, elapsed, str(e), False
+
+    finally:
+        if log_path.exists():
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
 
 
 def main():
@@ -240,8 +321,14 @@ def main():
     parser.add_argument(
         "--timeout",
         type=int,
-        default=300,
-        help="Timeout in seconds per file (default: 300)"
+        default=60,
+        help="Timeout in seconds per file (default: 60)"
+    )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=int,
+        default=15,
+        help="Interval in seconds for in-progress updates if conversion takes longer (default: 15)"
     )
 
     args = parser.parse_args()
@@ -285,6 +372,7 @@ def main():
         return 1
 
     print(f"OpenSCAD Executable:   {openscad_exe}")
+    print(f"Timeout per file:      {args.timeout}s (updates every {args.heartbeat_interval}s if >{args.heartbeat_interval}s)")
     print(f"Concurrent Workers:    {args.workers}")
     print("-" * 72)
 
@@ -308,13 +396,27 @@ def main():
     start_total_time = time.time()
     results = []
 
+    def make_heartbeat_cb(rel_path):
+        def cb(elapsed_sec):
+            with print_lock:
+                print(f"       --> {rel_path}: still converting ({elapsed_sec}s elapsed)...", flush=True)
+        return cb
+
     def task(item):
         src_path, rel_path = item
         target_path = dist_dir / rel_path
-        success, size_bytes, elapsed, logs = compile_single_file(
-            openscad_exe, src_path, target_path, env, timeout=args.timeout
+        heartbeat_cb = make_heartbeat_cb(rel_path)
+
+        success, size_bytes, elapsed, logs, timed_out = compile_single_file(
+            openscad_exe,
+            src_path,
+            target_path,
+            env,
+            timeout=args.timeout,
+            heartbeat_interval=args.heartbeat_interval,
+            on_heartbeat=heartbeat_cb
         )
-        return rel_path, target_path, success, size_bytes, elapsed, logs
+        return rel_path, target_path, success, size_bytes, elapsed, logs, timed_out
 
     total = len(scad_files)
     completed_count = 0
@@ -327,22 +429,25 @@ def main():
 
         for future in as_completed(futures):
             completed_count += 1
-            rel_path, target_path, success, size_bytes, elapsed, logs = future.result()
-            results.append((rel_path, success, size_bytes, elapsed, logs))
+            rel_path, target_path, success, size_bytes, elapsed, logs, timed_out = future.result()
+            results.append((rel_path, success, size_bytes, elapsed, logs, timed_out))
 
             status_str = "OK" if success else "FAIL"
             size_str = f"{size_bytes / 1024:.1f} KB" if success else "0 KB"
-            print(f"[{completed_count:>2}/{total}] [{status_str:>4}] {rel_path} ({elapsed:.1f}s, {size_str})")
 
-            if success:
-                success_count += 1
-            else:
-                fail_count += 1
-                if logs:
-                    # Print first few lines of error log indented
-                    err_lines = logs.strip().splitlines()
-                    for line in err_lines[:4]:
-                        print(f"         ! {line}")
+            with print_lock:
+                print(f"[{completed_count:>2}/{total}] [{status_str:>4}] {rel_path} ({elapsed:.1f}s, {size_str})", flush=True)
+
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    if timed_out:
+                        print(f"         ! Conversion timed out after {args.timeout}s", flush=True)
+                    elif logs:
+                        err_lines = logs.strip().splitlines()
+                        for line in err_lines[:4]:
+                            print(f"         ! {line}", flush=True)
 
     total_time = time.time() - start_total_time
 
@@ -357,4 +462,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
