@@ -37,7 +37,7 @@ include <BOSL2/std.scad>
 include <BOSL2/threading.scad>
 
 // Include external Multiconnect parametric rail module
-use <../multiconnect/multiconnectRails.scad>
+use <../multiconnect/lib/multiconnectRails.scad>
 
 /* [Part Selection / Display] */
 // Select render view
