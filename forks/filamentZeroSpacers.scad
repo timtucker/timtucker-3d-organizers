@@ -18,7 +18,7 @@
 
 /* [Basic] */
 // Which base style to build
-model = "rigid"; // [net_light:Net+, net_heavy:Tape+, rigid:Beam, net_rigid:Beam+]
+model = "net_rigid"; // [net_light:Net+, net_heavy:Tape+, rigid:Beam, net_rigid:Beam+]
 
 // Squares wide
 columns = 4; // [1:0.5:10]
